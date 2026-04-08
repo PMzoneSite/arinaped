@@ -11,15 +11,23 @@ $admin->execute([$_SESSION['user_id']]);
 $admin = $admin->fetch();
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_master'])) {
-    $phone = $_POST['phone'];
+    $phone = normalize_phone($_POST['phone'] ?? '');
     $full_name = $_POST['full_name'];
     $password = $_POST['password'];
     $spec = $_POST['spec'];
     if (strlen($password) >= 6 && preg_match('/^\+7[0-9]{10}$/', $phone)) {
         $pwd_hash = password_hash($password, PASSWORD_DEFAULT);
-        $stmt = $pdo->prepare("INSERT INTO Users (phone, full_name, pwd_hash, role, spec, active_cnt) VALUES (?, ?, ?, 'master', ?, 0)");
-        $stmt->execute([$phone, $full_name, $pwd_hash, $spec]);
-        $success = "✅ Мастер успешно добавлен";
+        try {
+            $stmt = $pdo->prepare("INSERT INTO Users (phone, full_name, pwd_hash, role, spec, active_cnt) VALUES (?, ?, ?, 'master', ?, 0)");
+            $stmt->execute([$phone, $full_name, $pwd_hash, $spec]);
+            $success = "✅ Мастер успешно добавлен";
+        } catch (PDOException $e) {
+            if ((int)($e->errorInfo[1] ?? 0) === 1062) {
+                $error = "❌ Пользователь с таким телефоном уже существует";
+            } else {
+                throw $e;
+            }
+        }
     } else {
         $error = "❌ Неверный формат телефона или пароль слишком короткий";
     }
@@ -29,7 +37,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_master'])) {
 
 if (isset($_GET['del_master'])) {
     $mid = $_GET['del_master'];
-    $check = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE master_id = ? AND status IN ('active', 'inactive')");
+    $check = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE master_id = ? AND status IN ('approved','in_work')");
     $check->execute([$mid]);
     if ($check->fetchColumn() == 0) {
         $pdo->prepare("DELETE FROM Users WHERE id = ? AND role='master'")->execute([$mid]);
@@ -44,14 +52,62 @@ if (isset($_GET['del_master'])) {
 if (isset($_POST['update_order_status'])) {
     $order_id = $_POST['order_id'];
     $new_status = $_POST['new_status'];
-    $stmt = $pdo->prepare("UPDATE orders SET status = ? WHERE id = ?");
-    $stmt->execute([$new_status, $order_id]);
-    $success = "✅ Статус заявки обновлен";
+    $pdo->beginTransaction();
+    try {
+        $o = $pdo->prepare("SELECT id, status, spec, master_id FROM orders WHERE id = ? FOR UPDATE");
+        $o->execute([$order_id]);
+        $order = $o->fetch(PDO::FETCH_ASSOC);
+        if (!$order) {
+            $pdo->rollBack();
+            header('Location: admin_panel.php');
+            exit;
+        }
+
+            if (is_string($new_status) && substr($new_status, 0, 7) === 'assign_') {
+            $masterId = (int)($_POST['master_id'] ?? explode('_', $new_status, 2)[1] ?? 0);
+            $m = $pdo->prepare("SELECT id FROM Users WHERE id = ? AND role='master' AND spec = ? AND active_cnt < 4 FOR UPDATE");
+            $m->execute([$masterId, $order['spec']]);
+            $okMaster = $m->fetchColumn();
+            if ($okMaster && $order['master_id'] === null && in_array($order['status'], ['approved','new'], true)) {
+                $upd = $pdo->prepare("UPDATE orders SET master_id = ?, status = 'approved' WHERE id = ? AND master_id IS NULL");
+                $upd->execute([$masterId, $order_id]);
+                if ($upd->rowCount() === 1) {
+                    $pdo->prepare("UPDATE Users SET active_cnt = active_cnt + 1 WHERE id = ?")->execute([$masterId]);
+                }
+                $success = "✅ Мастер назначен";
+            }
+        } else {
+            $activeBefore = in_array($order['status'], ['approved','in_work'], true);
+            $activeAfter = in_array($new_status, ['approved','in_work'], true);
+
+            $stmt = $pdo->prepare("UPDATE orders SET status = ? WHERE id = ?");
+            $stmt->execute([$new_status, $order_id]);
+
+            if ($activeBefore && !$activeAfter && !empty($order['master_id'])) {
+                dec_master_active_cnt($pdo, (int)$order['master_id']);
+            }
+            if ($new_status === 'approved' && empty($order['master_id'])) {
+                // По ТЗ: назначаем мастера после approved
+                assign_master_for_order($pdo, (int)$order_id);
+            }
+            $success = "✅ Статус заявки обновлен";
+        }
+
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        throw $e;
+    }
     header('Location: admin_panel.php');
     exit;
 }
 
-$all_orders = $pdo->query("SELECT o.*, a.city, a.street, a.house, a.apartment, u.full_name as client_name, m.full_name as master_name FROM orders o LEFT JOIN Addresses a ON o.address_id = a.id LEFT JOIN Users u ON o.client_id = u.id LEFT JOIN Users m ON o.master_id = m.id ORDER BY o.created_at DESC")->fetchAll();
+$all_orders = $pdo->query("SELECT o.*, a.city, a.street, a.house, a.apt, u.full_name as client_name, m.full_name as master_name
+FROM orders o
+LEFT JOIN Addresses a ON o.address_id = a.id
+LEFT JOIN Users u ON o.client_id = u.id
+LEFT JOIN Users m ON o.master_id = m.id
+ORDER BY o.created_at DESC")->fetchAll();
 
 $all_users = $pdo->query("SELECT id, phone, full_name, role, spec, active_cnt FROM Users ORDER BY id")->fetchAll();
 
@@ -59,12 +115,17 @@ $masters = $pdo->query("SELECT * FROM Users WHERE role='master' ORDER BY id")->f
 
 $stats = [
     'total_orders' => count($all_orders),
-    'active_orders' => $pdo->query("SELECT COUNT(*) FROM orders WHERE status IN ('active', 'inactive', 'approved')")->fetchColumn(),
+    'active_orders' => $pdo->query("SELECT COUNT(*) FROM orders WHERE status IN ('new','approved','in_work')")->fetchColumn(),
     'total_users' => count($all_users),
     'total_masters' => count($masters)
 ];
 
-$pending_orders = $pdo->query("SELECT o.*, u.full_name as client_name, a.city, a.street, a.house FROM orders o JOIN Users u ON o.client_id = u.id JOIN Addresses a ON o.address_id = a.id WHERE o.status = 'approved' AND o.master_id IS NULL ORDER BY o.created_at ASC")->fetchAll();
+$pending_orders = $pdo->query("SELECT o.*, u.full_name as client_name, a.city, a.street, a.house
+FROM orders o
+JOIN Users u ON o.client_id = u.id
+JOIN Addresses a ON o.address_id = a.id
+WHERE o.status IN ('new','approved') AND o.master_id IS NULL
+ORDER BY o.created_at ASC")->fetchAll();
 ?>
 <!DOCTYPE html>
 <html>
@@ -125,8 +186,8 @@ $pending_orders = $pdo->query("SELECT o.*, u.full_name as client_name, a.city, a
                                 <td>
                                     <form method="POST" style="display: inline-block;">
                                         <input type="hidden" name="order_id" value="<?= $order['id'] ?>">
-                                        <select name="new_status" onchange="this.form.submit()" style="padding: 5px;">
-                                            <option value="approved">📋 Назначить мастера</option>
+                                        <select name="new_status" style="padding: 5px;">
+                                            <option value="approved">📋 Авто-назначение</option>
                                             <?php foreach ($masters as $master): ?>
                                                 <?php if ($master['spec'] == $order['spec']): ?>
                                                     <option value="assign_<?= $master['id'] ?>">👨‍🔧 Назначить: <?= htmlspecialchars($master['full_name']) ?></option>
@@ -161,10 +222,12 @@ $pending_orders = $pdo->query("SELECT o.*, u.full_name as client_name, a.city, a
                                 <?php
                                 $status_badge = '';
                                 switch($order['status']) {
-                                    case 'active': $status_badge = '<span class="status status-active">🟡 Активна</span>'; break;
-                                    case 'inactive': $status_badge = '<span class="status status-inactive">🟠 В работе</span>'; break;
-                                    case 'closed': $status_badge = '<span class="status status-closed">✅ Закрыта</span>'; break;
-                                    case 'approved': $status_badge = '<span class="status status-approved">🟢 Одобрена</span>'; break;
+                                    case 'new': $status_badge = '<span class="status status-inactive">🟠 Новая</span>'; break;
+                                    case 'approved': $status_badge = '<span class="status status-approved">🟢 Назначен мастер</span>'; break;
+                                    case 'in_work': $status_badge = '<span class="status status-active">🟡 В работе</span>'; break;
+                                    case 'done': $status_badge = '<span class="status status-closed">✅ Выполнена</span>'; break;
+                                    case 'rejected': $status_badge = '<span class="status status-closed">❌ Отклонена</span>'; break;
+                                    case 'cancelled': $status_badge = '<span class="status status-closed">🚫 Отменена</span>'; break;
                                     default: $status_badge = $order['status'];
                                 }
                                 echo $status_badge;
@@ -174,12 +237,14 @@ $pending_orders = $pdo->query("SELECT o.*, u.full_name as client_name, a.city, a
                             <td>
                                 <form method="POST" style="display: inline-block;">
                                     <input type="hidden" name="order_id" value="<?= $order['id'] ?>">
-                                    <select name="new_status" onchange="this.form.submit()" style="padding: 5px; font-size: 12px;">
+                                    <select name="new_status" style="padding: 5px; font-size: 12px;">
                                         <option value="">Изменить статус</option>
-                                        <option value="active">🟡 Активна</option>
-                                        <option value="inactive">🟠 В работе</option>
-                                        <option value="closed">✅ Закрыта</option>
-                                        <option value="approved">🟢 Одобрена</option>
+                                        <option value="new">🟠 Новая</option>
+                                        <option value="approved">🟢 Одобрена (назначить мастера)</option>
+                                        <option value="in_work">🟡 В работе</option>
+                                        <option value="done">✅ Выполнена</option>
+                                        <option value="rejected">❌ Отклонена</option>
+                                        <option value="cancelled">🚫 Отменена</option>
                                     </select>
                                     <input type="hidden" name="update_order_status" value="1">
                                 </form>
@@ -274,6 +339,8 @@ $pending_orders = $pdo->query("SELECT o.*, u.full_name as client_name, a.city, a
                 } else {
                     this.value = '';
                 }
+            } else if (this.value) {
+                this.closest('form').submit();
             }
         });
     });

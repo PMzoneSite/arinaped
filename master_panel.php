@@ -14,48 +14,73 @@ $master = $master->fetch();
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action'])) {
     $order_id = $_POST['order_id'];
     if ($_POST['action'] == 'accept') {
-        $stmt = $pdo->prepare("UPDATE orders SET status = 'inactive' WHERE id = ? AND master_id = ?");
+        $stmt = $pdo->prepare("UPDATE orders SET status = 'in_work' WHERE id = ? AND master_id = ? AND status = 'approved'");
         $stmt->execute([$order_id, $master_id]);
         $success = "✅ Заявка принята! Свяжитесь с клиентом.";
     } elseif ($_POST['action'] == 'reject') {
         $reason = $_POST['reason'];
-        if (strlen($reason) >= 10 && strlen($reason) <= 500) {
-            $order = $pdo->prepare("SELECT * FROM orders WHERE id = ? AND master_id = ?");
+        if (mb_len($reason) >= 10 && mb_len($reason) <= 500) {
+            $order = $pdo->prepare("SELECT * FROM orders WHERE id = ? AND master_id = ? AND status = 'approved'");
             $order->execute([$order_id, $master_id]);
             $ord = $order->fetch();
             if ($ord) {
-                $stmt = $pdo->prepare("INSERT INTO Rejections (client_id, address_id, master_id, spec, description, status, created_at) VALUES (?, ?, ?, ?, ?, 'closed', NOW())");
-                $stmt->execute([$ord['client_id'], $ord['address_id'], $master_id, $ord['spec'], $reason]);
-                $upd = $pdo->prepare("UPDATE orders SET status = 'closed' WHERE id = ?");
+                $stmt = $pdo->prepare("INSERT INTO Rejections (order_id, reason) VALUES (?, ?) ON DUPLICATE KEY UPDATE reason = VALUES(reason)");
+                $stmt->execute([$order_id, $reason]);
+                $upd = $pdo->prepare("UPDATE orders SET status = 'rejected' WHERE id = ?");
                 $upd->execute([$order_id]);
-                $up_cnt = $pdo->prepare("UPDATE Users SET active_cnt = active_cnt - 1 WHERE id = ?");
-                $up_cnt->execute([$master_id]);
+                dec_master_active_cnt($pdo, $master_id);
                 $success = "❌ Заявка отклонена. Причина сохранена.";
             }
         } else {
             $error = "Причина отказа должна быть от 10 до 500 символов";
         }
+    } elseif ($_POST['action'] == 'done') {
+        $stmt = $pdo->prepare("UPDATE orders SET status = 'done' WHERE id = ? AND master_id = ? AND status = 'in_work'");
+        $stmt->execute([$order_id, $master_id]);
+        if ($stmt->rowCount() === 1) {
+            dec_master_active_cnt($pdo, $master_id);
+        }
+        $success = "✅ Заявка отмечена как выполненная.";
     }
     header('Location: master_panel.php');
     exit;
 }
 
-$active_orders = $pdo->prepare("SELECT o.*, a.street, a.house, a.apartment, a.entrance, a.floor, a.city, u.phone, u.full_name as client_name FROM orders o JOIN Addresses a ON o.address_id = a.id JOIN Users u ON o.client_id = u.id WHERE o.master_id = ? AND o.status = 'active'");
+$active_orders = $pdo->prepare("SELECT o.*, a.street, a.house, a.apt, a.entrance, a.floor, a.city, u.phone, u.full_name as client_name
+FROM orders o
+JOIN Addresses a ON o.address_id = a.id
+JOIN Users u ON o.client_id = u.id
+WHERE o.master_id = ? AND o.status = 'approved'
+ORDER BY o.created_at ASC");
 $active_orders->execute([$master_id]);
 $active_orders = $active_orders->fetchAll();
 
-$inactive_orders = $pdo->prepare("SELECT o.*, a.street, a.house, a.apartment, a.city, u.phone, u.full_name as client_name FROM orders o JOIN Addresses a ON o.address_id = a.id JOIN Users u ON o.client_id = u.id WHERE o.master_id = ? AND o.status = 'inactive' ORDER BY o.created_at DESC");
+$inactive_orders = $pdo->prepare("SELECT o.*, a.street, a.house, a.apt, a.city, u.phone, u.full_name as client_name
+FROM orders o
+JOIN Addresses a ON o.address_id = a.id
+JOIN Users u ON o.client_id = u.id
+WHERE o.master_id = ? AND o.status = 'in_work'
+ORDER BY o.created_at DESC");
 $inactive_orders->execute([$master_id]);
 $inactive_orders = $inactive_orders->fetchAll();
 
-$history = $pdo->prepare("SELECT o.*, a.street, a.house, a.apartment, a.city, u.full_name as client_name FROM orders o JOIN Addresses a ON o.address_id = a.id JOIN Users u ON o.client_id = u.id WHERE o.master_id = ? AND o.status = 'closed' ORDER BY o.created_at DESC LIMIT 20");
+$history = $pdo->prepare("SELECT o.*, a.street, a.house, a.apt, a.city, u.full_name as client_name
+FROM orders o
+JOIN Addresses a ON o.address_id = a.id
+JOIN Users u ON o.client_id = u.id
+WHERE o.master_id = ? AND o.status IN ('done','rejected')
+ORDER BY o.created_at DESC LIMIT 20");
 $history->execute([$master_id]);
 $history = $history->fetchAll();
+
+$completedStmt = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE master_id = ? AND status = 'done'");
+$completedStmt->execute([$master_id]);
+$completedCount = (int)$completedStmt->fetchColumn();
 
 $stats = [
     'active' => count($active_orders),
     'inactive' => count($inactive_orders),
-    'completed' => $pdo->prepare("SELECT COUNT(*) FROM orders WHERE master_id = ? AND status = 'closed'")->execute([$master_id]) ? $pdo->prepare("SELECT COUNT(*) FROM orders WHERE master_id = ? AND status = 'closed'")->fetchColumn() : 0
+    'completed' => $completedCount
 ];
 ?>
 <!DOCTYPE html>
@@ -103,7 +128,7 @@ $stats = [
                             <h4>📋 Заявка #<?= $order['id'] ?></h4>
                             <p><span class="label">👤 Клиент:</span> <?= htmlspecialchars($order['client_name']) ?></p>
                             <p><span class="label">📱 Телефон:</span> <a href="tel:<?= $order['phone'] ?>"><?= $order['phone'] ?></a></p>
-                            <p><span class="label">📍 Адрес:</span> <?= htmlspecialchars($order['city'] . ', ' . $order['street'] . ', ' . $order['house'] . ($order['apartment'] ? ', кв.' . $order['apartment'] : '') . ($order['entrance'] ? ', под.' . $order['entrance'] : '') . ($order['floor'] ? ', эт.' . $order['floor'] : '')) ?></p>
+                            <p><span class="label">📍 Адрес:</span> <?= htmlspecialchars($order['city'] . ', ' . $order['street'] . ', ' . $order['house'] . ($order['apt'] ? ', кв.' . $order['apt'] : '') . ($order['entrance'] ? ', под.' . $order['entrance'] : '') . ($order['floor'] ? ', эт.' . $order['floor'] : '')) ?></p>
                             <p><span class="label">📝 Описание:</span> <?= htmlspecialchars($order['description']) ?></p>
                             <p><span class="label">📅 Создана:</span> <?= date('d.m.Y H:i', strtotime($order['created_at'])) ?></p>
                             <div style="display: flex; gap: 10px; margin-top: 15px;">
@@ -114,6 +139,7 @@ $stats = [
                                 <form method="POST" style="flex: 1;" onsubmit="return false;">
                                     <input type="hidden" name="order_id" value="<?= $order['id'] ?>">
                                     <input type="text" name="reason" id="reason_<?= $order['id'] ?>" style="display:none;">
+                                    <input type="hidden" name="action" value="reject">
                                     <button type="button" class="btn btn-danger" style="width: 100%;" onclick="var r=prompt('Укажите причину отказа (10-500 символов):'); if(r && r.length>=10 && r.length<=500){ document.getElementById('reason_<?= $order['id'] ?>').value=r; this.form.submit();} else if(r){ alert('Причина должна быть от 10 до 500 символов'); }">❌ Отклонить</button>
                                 </form>
                             </div>
@@ -129,7 +155,7 @@ $stats = [
                 <div class="table-container">
                     <table>
                         <thead>
-                            <tr><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Описание</th><th>Дата</th></tr>
+                            <tr><th>Клиент</th><th>Телефон</th><th>Адрес</th><th>Описание</th><th>Дата</th><th>Действие</th></tr>
                         </thead>
                         <tbody>
                             <?php foreach ($inactive_orders as $order): ?>
@@ -139,6 +165,12 @@ $stats = [
                                     <td><?= htmlspecialchars($order['city'] . ', ' . $order['street'] . ', ' . $order['house']) ?></td>
                                     <td><?= htmlspecialchars(mb_substr($order['description'], 0, 50)) ?>...</td>
                                     <td><?= date('d.m.Y', strtotime($order['created_at'])) ?></td>
+                                    <td>
+                                        <form method="POST" style="display:inline-block;">
+                                            <input type="hidden" name="order_id" value="<?= $order['id'] ?>">
+                                            <button type="submit" name="action" value="done" class="btn btn-success" style="padding: 5px 10px; font-size: 12px;" onclick="return confirm('Отметить как выполненную?')">✅ Выполнено</button>
+                                        </form>
+                                    </td>
                                 </tr>
                             <?php endforeach; ?>
                         </tbody>

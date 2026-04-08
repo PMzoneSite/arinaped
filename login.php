@@ -1,8 +1,13 @@
 <?php
 require_once 'db.php';
 
+$adminPhonePrefill = '';
+if (isset($_GET['admin']) && $_GET['admin'] == '1') {
+    $adminPhonePrefill = '+79990000001';
+}
+
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    $phone = $_POST['phone'];
+    $phone = normalize_phone($_POST['phone'] ?? '');
     $password = $_POST['password'];
 
     $stmt = $pdo->prepare("SELECT * FROM Users WHERE phone = ?");
@@ -42,7 +47,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 <form method="POST">
                     <div class="form-group">
                         <label>📱 Номер телефона</label>
-                        <input type="tel" name="phone" placeholder="+7XXXXXXXXXX" required value="<?= isset($_POST['phone']) ? htmlspecialchars($_POST['phone']) : '' ?>">
+                        <input type="tel" name="phone" placeholder="+7XXXXXXXXXX" required value="<?= isset($_POST['phone']) ? htmlspecialchars($_POST['phone']) : htmlspecialchars($adminPhonePrefill) ?>">
                     </div>
                     <div class="form-group">
                         <label>🔒 Пароль</label>
@@ -50,6 +55,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                     </div>
                     <button type="submit" class="btn btn-primary" style="width: 100%;">Войти</button>
                 </form>
+                <div style="margin-top: 12px;">
+                    <a href="login.php?admin=1" class="btn btn-secondary" style="width: 100%; display: inline-block; text-align: center;">👑 Вход администратора</a>
+                </div>
                 <div style="text-align: center; margin-top: 20px;">
                     <p>Нет аккаунта? <a href="register.php" style="color: #667eea;">Зарегистрироваться</a></p>
                 </div>

@@ -2,11 +2,11 @@
 require_once 'db.php';
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    $phone = $_POST['phone'];
+    $phone = normalize_phone($_POST['phone'] ?? '');
     $full_name = $_POST['full_name'];
     $password = $_POST['password'];
-    $role = $_POST['role'];
-    $spec = ($role == 'master') ? $_POST['spec'] : null;
+    $role = 'client';
+    $spec = null;
 
     if (strlen($password) < 6) {
         $error = "Пароль должен быть не менее 6 символов";
@@ -57,20 +57,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                         <label>🔒 Пароль</label>
                         <input type="password" name="password" placeholder="Не менее 6 символов" required>
                     </div>
-                    <div class="form-group">
-                        <label>👔 Роль</label>
-                        <select name="role" required id="role">
-                            <option value="client">Клиент</option>
-                            <option value="master">Мастер</option>
-                        </select>
-                    </div>
-                    <div class="form-group" id="specGroup" style="display: none;">
-                        <label>🔧 Специальность</label>
-                        <select name="spec">
-                            <option value="plumber">Сантехник</option>
-                            <option value="electrician">Электрик</option>
-                        </select>
-                    </div>
                     <button type="submit" class="btn btn-primary" style="width: 100%;">Зарегистрироваться</button>
                 </form>
                 <div style="text-align: center; margin-top: 20px;">
@@ -79,10 +65,5 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             </div>
         </div>
     </div>
-    <script>
-        document.getElementById('role').addEventListener('change', function() {
-            document.getElementById('specGroup').style.display = this.value == 'master' ? 'block' : 'none';
-        });
-    </script>
 </body>
 </html>

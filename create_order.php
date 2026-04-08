@@ -11,25 +11,34 @@ $user = $pdo->prepare("SELECT * FROM Users WHERE id = ?");
 $user->execute([$user_id]);
 $user = $user->fetch();
 
-$addresses = $pdo->query("SELECT * FROM Addresses")->fetchAll();
+$addresses = $pdo->prepare("SELECT * FROM Addresses WHERE user_id = ? ORDER BY id DESC");
+$addresses->execute([$user_id]);
+$addresses = $addresses->fetchAll();
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    $address_id = $_POST['address_id'];
+    $address_id = (int)($_POST['address_id'] ?? 0);
     $spec = $_POST['spec'];
     $description = $_POST['description'];
 
-    if (strlen($description) < 10 || strlen($description) > 1000) {
+    if (mb_len($description) < 10 || mb_len($description) > 1000) {
         $error = "Описание должно быть от 10 до 1000 символов";
     } else {
-        $check = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE client_id = ? AND spec = ? AND status IN ('active', 'inactive', 'approved')");
+        $ownAddr = $pdo->prepare("SELECT COUNT(*) FROM Addresses WHERE id = ? AND user_id = ?");
+        $ownAddr->execute([$address_id, $user_id]);
+        if ($ownAddr->fetchColumn() == 0) {
+            $error = "Выберите корректный адрес из списка";
+        } else {
+        $check = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE client_id = ? AND spec = ? AND status IN ('new','approved','in_work')");
         $check->execute([$user_id, $spec]);
         if ($check->fetchColumn() > 0) {
             $error = "У вас уже есть активная заявка по этой специальности";
         } else {
-            $stmt = $pdo->prepare("INSERT INTO orders (client_id, address_id, spec, description, status, created_at) VALUES (?, ?, ?, ?, 'approved', NOW())");
+            // По ТЗ: после создания заявка новая, затем админ одобряет (approved) и система назначает мастера
+            $stmt = $pdo->prepare("INSERT INTO orders (client_id, address_id, spec, description, status, created_at) VALUES (?, ?, ?, ?, 'new', NOW())");
             $stmt->execute([$user_id, $address_id, $spec, $description]);
             header('Location: profile.php?success=1');
             exit;
+        }
         }
     }
 }
@@ -68,7 +77,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                             <option value="">-- Выберите адрес --</option>
                             <?php foreach ($addresses as $addr): ?>
                                 <option value="<?= $addr['id'] ?>">
-                                    <?= htmlspecialchars($addr['city'] . ', ' . $addr['street'] . ', ' . $addr['house'] . ($addr['apartment'] ? ', кв.' . $addr['apartment'] : '')) ?>
+                                    <?= htmlspecialchars($addr['city'] . ', ' . $addr['street'] . ', ' . $addr['house'] . ($addr['apt'] ? ', кв.' . $addr['apt'] : '')) ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>

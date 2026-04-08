@@ -16,38 +16,43 @@ $user = $user->fetch();
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_address'])) {
     $street = $_POST['street'];
     $house = $_POST['house'];
-    $apartment = $_POST['apartment'];
+    $apt = $_POST['apartment'];
     $entrance = $_POST['entrance'];
     $floor = $_POST['floor'];
     $city = $_POST['city'];
-    $state = $_POST['state'];
-    $postcode = $_POST['postcode'];
-    $country = $_POST['country'];
     
-    $stmt = $pdo->prepare("INSERT INTO Addresses (street, house, apartment, entrance, floor, city, state, postcode, country) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    $stmt->execute([$street, $house, $apartment, $entrance, $floor, $city, $state, $postcode, $country]);
+    $stmt = $pdo->prepare("INSERT INTO Addresses (user_id, city, street, house, apt, entrance, floor) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    $stmt->execute([$user_id, $city, $street, $house, $apt ?: null, $entrance ?: null, $floor ?: null]);
     header("Location: profile.php");
     exit;
 }
 
 if (isset($_GET['del_addr'])) {
-    $pdo->prepare("DELETE FROM Addresses WHERE id = ?")->execute([$_GET['del_addr']]);
+    $pdo->prepare("DELETE FROM Addresses WHERE id = ? AND user_id = ?")->execute([$_GET['del_addr'], $user_id]);
     header("Location: profile.php");
     exit;
 }
 
 $filter = isset($_GET['filter']) ? $_GET['filter'] : 'active';
-if ($filter == 'active') $status_cond = "status IN ('active', 'inactive', 'approved')";
-elseif ($filter == 'closed') $status_cond = "status = 'closed'";
+if ($filter == 'active') $status_cond = "status IN ('new','approved','in_work')";
+elseif ($filter == 'closed') $status_cond = "status = 'done'";
+elseif ($filter == 'cancelled') $status_cond = "status IN ('cancelled','rejected')";
 else $status_cond = "1";
 
-$orders = $pdo->prepare("SELECT o.*, a.street, a.house, a.apartment, a.city FROM orders o LEFT JOIN Addresses a ON o.address_id = a.id WHERE o.client_id = ? AND $status_cond ORDER BY o.created_at DESC");
+$orders = $pdo->prepare("SELECT o.*, a.street, a.house, a.apt, a.city, r.reason AS rejection_reason
+FROM orders o
+LEFT JOIN Addresses a ON o.address_id = a.id
+LEFT JOIN Rejections r ON r.order_id = o.id
+WHERE o.client_id = ? AND $status_cond
+ORDER BY o.created_at DESC");
 $orders->execute([$user_id]);
 $orders = $orders->fetchAll();
 
-$addresses = $pdo->query("SELECT * FROM Addresses")->fetchAll();
+$addresses = $pdo->prepare("SELECT * FROM Addresses WHERE user_id = ? ORDER BY id DESC");
+$addresses->execute([$user_id]);
+$addresses = $addresses->fetchAll();
 
-$active_counts = $pdo->prepare("SELECT spec, COUNT(*) as cnt FROM orders WHERE client_id = ? AND status IN ('active', 'inactive', 'approved') GROUP BY spec");
+$active_counts = $pdo->prepare("SELECT spec, COUNT(*) as cnt FROM orders WHERE client_id = ? AND status IN ('new','approved','in_work') GROUP BY spec");
 $active_counts->execute([$user_id]);
 $active_map = [];
 foreach ($active_counts->fetchAll() as $row) $active_map[$row['spec']] = $row['cnt'];
@@ -78,6 +83,7 @@ foreach ($active_counts->fetchAll() as $row) $active_map[$row['spec']] = $row['c
             <div class="filters">
                 <a href="?filter=active" class="filter-btn <?= $filter == 'active' ? 'active' : '' ?>">В работе</a>
                 <a href="?filter=closed" class="filter-btn <?= $filter == 'closed' ? 'active' : '' ?>">Выполнены</a>
+                <a href="?filter=cancelled" class="filter-btn <?= $filter == 'cancelled' ? 'active' : '' ?>">Отменены</a>
                 <a href="?filter=all" class="filter-btn <?= $filter == 'all' ? 'active' : '' ?>">Все</a>
             </div>
 
@@ -93,25 +99,32 @@ foreach ($active_counts->fetchAll() as $row) $active_map[$row['spec']] = $row['c
                         <?php foreach ($orders as $order): ?>
                             <tr>
                                 <td><?= $order['spec'] == 'plumber' ? '🔧 Сантехник' : '⚡ Электрик' ?></td>
-                                <td><?= htmlspecialchars($order['city'] . ', ' . $order['street'] . ', ' . $order['house'] . ($order['apartment'] ? ', кв.' . $order['apartment'] : '')) ?></td>
+                                <td><?= htmlspecialchars($order['city'] . ', ' . $order['street'] . ', ' . $order['house'] . ($order['apt'] ? ', кв.' . $order['apt'] : '')) ?></td>
                                 <td><?= htmlspecialchars(mb_substr($order['description'], 0, 50)) ?>...</td>
                                 <td>
                                     <?php
                                     $status_class = '';
                                     $status_text = '';
                                     switch($order['status']) {
-                                        case 'active': $status_class = 'status-active'; $status_text = '🟡 Активна'; break;
-                                        case 'inactive': $status_class = 'status-inactive'; $status_text = '🟠 В обработке'; break;
-                                        case 'closed': $status_class = 'status-closed'; $status_text = '✅ Выполнена'; break;
-                                        case 'approved': $status_class = 'status-approved'; $status_text = '🟢 Одобрена'; break;
+                                        case 'new': $status_class = 'status-inactive'; $status_text = '🟠 Новая'; break;
+                                        case 'approved': $status_class = 'status-approved'; $status_text = '🟢 Назначен мастер'; break;
+                                        case 'in_work': $status_class = 'status-active'; $status_text = '🟡 В работе'; break;
+                                        case 'done': $status_class = 'status-closed'; $status_text = '✅ Выполнена'; break;
+                                        case 'cancelled': $status_class = 'status-closed'; $status_text = '🚫 Отменена'; break;
+                                        case 'rejected': $status_class = 'status-closed'; $status_text = '❌ Отклонена'; break;
                                         default: $status_class = ''; $status_text = $order['status'];
                                     }
                                     ?>
                                     <span class="status <?= $status_class ?>"><?= $status_text ?></span>
+                                    <?php if ($order['status'] == 'rejected' && !empty($order['rejection_reason'])): ?>
+                                        <div style="color:#6b7280; font-size:12px; margin-top:4px;">
+                                            Причина: <?= htmlspecialchars($order['rejection_reason']) ?>
+                                        </div>
+                                    <?php endif; ?>
                                 </td>
                                 <td><?= date('d.m.Y H:i', strtotime($order['created_at'])) ?></td>
                                 <td>
-                                    <?php if ($order['status'] == 'active' || $order['status'] == 'approved'): ?>
+                                    <?php if (in_array($order['status'], ['new','approved','in_work'], true)): ?>
                                         <a href="cancel_order.php?id=<?= $order['id'] ?>" class="btn btn-danger" style="padding: 5px 10px; font-size: 12px;" onclick="return confirm('Отменить заявку?')">Отменить</a>
                                     <?php endif; ?>
                                 </td>
@@ -129,7 +142,7 @@ foreach ($active_counts->fetchAll() as $row) $active_map[$row['spec']] = $row['c
                         <div>
                             <strong><?= htmlspecialchars($addr['city']) ?></strong><br>
                             <?= htmlspecialchars($addr['street']) ?>, <?= htmlspecialchars($addr['house']) ?>
-                            <?php if ($addr['apartment']): ?>, кв. <?= htmlspecialchars($addr['apartment']) ?><?php endif; ?>
+                            <?php if ($addr['apt']): ?>, кв. <?= htmlspecialchars($addr['apt']) ?><?php endif; ?>
                             <?php if ($addr['entrance']): ?>, под. <?= htmlspecialchars($addr['entrance']) ?><?php endif; ?>
                             <?php if ($addr['floor']): ?>, эт. <?= htmlspecialchars($addr['floor']) ?><?php endif; ?>
                         </div>
@@ -147,9 +160,6 @@ foreach ($active_counts->fetchAll() as $row) $active_map[$row['spec']] = $row['c
                     <div class="form-group"><input type="text" name="apartment" placeholder="Квартира"></div>
                     <div class="form-group"><input type="text" name="entrance" placeholder="Подъезд"></div>
                     <div class="form-group"><input type="text" name="floor" placeholder="Этаж"></div>
-                    <div class="form-group"><input type="text" name="state" placeholder="Область"></div>
-                    <div class="form-group"><input type="text" name="postcode" placeholder="Индекс"></div>
-                    <div class="form-group"><input type="text" name="country" placeholder="Страна" value="Россия"></div>
                 </div>
                 <button type="submit" name="add_address" class="btn btn-primary">Добавить адрес</button>
             </form>
