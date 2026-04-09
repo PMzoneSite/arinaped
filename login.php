@@ -6,6 +6,8 @@ if (isset($_GET['admin']) && $_GET['admin'] == '1') {
     $adminPhonePrefill = '+79990000001';
 }
 
+$masterMode = (isset($_GET['master']) && $_GET['master'] == '1');
+
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $phone = normalize_phone($_POST['phone'] ?? '');
     $password = $_POST['password'];
@@ -40,7 +42,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         </div>
         <div class="content">
             <div style="max-width: 400px; margin: 0 auto;">
-                <h2>Вход в систему</h2>
+                <h2><?= $masterMode ? 'Вход для мастера' : 'Вход в систему' ?></h2>
+                <?php if ($masterMode): ?>
+                    <div class="alert alert-info" style="margin-bottom: 15px;">
+                        Вход для мастеров. Если у вас нет доступа — попросите администратора создать аккаунт мастера.
+                    </div>
+                <?php endif; ?>
                 <?php if (isset($error)): ?>
                     <div class="alert alert-error"><?= $error ?></div>
                 <?php endif; ?>
@@ -58,8 +65,13 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 <div style="margin-top: 12px;">
                     <a href="login.php?admin=1" class="btn btn-secondary" style="width: 100%; display: inline-block; text-align: center;">👑 Вход администратора</a>
                 </div>
+                <div style="margin-top: 12px;">
+                    <a href="login.php?master=1" class="btn btn-secondary" style="width: 100%; display: inline-block; text-align: center;">🔧 Вход мастера</a>
+                </div>
                 <div style="text-align: center; margin-top: 20px;">
-                    <p>Нет аккаунта? <a href="register.php" style="color: #667eea;">Зарегистрироваться</a></p>
+                    <?php if (!$masterMode): ?>
+                        <p>Нет аккаунта? <a href="register.php" style="color: #667eea;">Зарегистрироваться</a></p>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
